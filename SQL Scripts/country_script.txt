@@ -1,0 +1,181 @@
+-- ============================================================
+-- update_batch_new_countries.sql
+-- Пакетное обновление стран (без Movements)
+-- ============================================================
+
+IF OBJECT_ID('tempdb..#CountryMap') IS NOT NULL DROP TABLE #CountryMap;
+CREATE TABLE #CountryMap (
+    OldId NVARCHAR(36),
+    NewId NVARCHAR(36),
+    OldValue NVARCHAR(500),
+    NewValue NVARCHAR(500)
+);
+
+INSERT INTO #CountryMap VALUES
+
+-- Непал
+('0EF79B50-C4ED-4E6B-846E-6594D6CC13A0','8a232784-de6d-4916-974c-6b11f97f9b65','Непал','Республика Непал (Непал)'),
+(NULL,'8a232784-de6d-4916-974c-6b11f97f9b65','Непал','Республика Непал (Непал)'),
+
+-- Нигер
+('F1761F85-352F-4740-AC5F-F157803E9FCA','f4360dda-3e18-4536-93b5-832bd681e9c1','Нигер','Республика Нигер (Нигер)'),
+(NULL,'f4360dda-3e18-4536-93b5-832bd681e9c1','Нигер','Республика Нигер (Нигер)'),
+
+-- Нигерия
+('A01BA922-40A0-4E7A-AE90-C16C9EA1E215','e8459741-6211-42ae-9334-fd8ebeda96d4','Нигерия','Федеративная Республика Нигерия (Нигерия)'),
+(NULL,'e8459741-6211-42ae-9334-fd8ebeda96d4','Нигерия','Федеративная Республика Нигерия (Нигерия)'),
+
+-- Никарагуа
+('9BE506DB-80EB-48AF-BE0B-0DB58F0D91DD','e15abaa7-8448-4970-bc93-bcab6d9e2900','Никарагуа','Никарагуа (Никарагуа)'),
+(NULL,'e15abaa7-8448-4970-bc93-bcab6d9e2900','Никарагуа','Никарагуа (Никарагуа)'),
+
+-- Ниуэ
+('692D33D9-8586-49ED-B502-00C816983A4D','d39deeff-1a73-43b3-ac45-6ce9ad033a82','Ниуэ','Ниуэ'),
+(NULL,'d39deeff-1a73-43b3-ac45-6ce9ad033a82','Ниуэ','Ниуэ'),
+
+-- Новая Зеландия
+('E02263C3-F89B-48DC-AB4E-B519BD62C28F','ae58a4bf-03ff-4a0a-a7aa-501a311ebe5a','Новая Зеландия','Новая Зеландия (Новая Зеландия)'),
+(NULL,'ae58a4bf-03ff-4a0a-a7aa-501a311ebe5a','Новая Зеландия','Новая Зеландия (Новая Зеландия)'),
+
+-- Новая Каледония
+('6DC31E1A-AE7B-4E69-8360-10E7E845C50A','ca68e2d5-09b8-4bbd-bc9b-1285ca0a4506','Новая Каледония','Новая Каледония (Новая Каледония)'),
+(NULL,'ca68e2d5-09b8-4bbd-bc9b-1285ca0a4506','Новая Каледония','Новая Каледония (Новая Каледония)'),
+
+-- Норфолк
+('E6DC9AA8-CCA8-4976-84BA-B72E302D0146','d63c535c-3cda-49e7-8e5a-9233f372179f','Норфолк','Норфолк'),
+(NULL,'d63c535c-3cda-49e7-8e5a-9233f372179f','Норфолк','Норфолк'),
+
+-- ОАЭ
+('EAF99044-7A47-428D-BAF9-215B58F3B75C','7139decd-386f-45e7-849a-c2499135ac68','Объединенные Арабские Эмираты','Объединенные Арабские Эмираты (ОАЭ)'),
+(NULL,'7139decd-386f-45e7-849a-c2499135ac68','Объединенные Арабские Эмираты','Объединенные Арабские Эмираты (ОАЭ)');
+
+
+-- ============================================================
+-- АНАЛИЗ
+-- ============================================================
+
+PRINT '=== АНАЛИЗ ===';
+
+SELECT 'Cards.Country',
+       c.CountryDictionaryId,
+       c.CountryDictionaryValue,
+       m.NewId,
+       m.NewValue,
+       COUNT(*)
+FROM dbo.Cards c
+JOIN #CountryMap m
+  ON UPPER(LTRIM(RTRIM(c.CountryDictionaryId))) = UPPER(m.OldId)
+GROUP BY c.CountryDictionaryId, c.CountryDictionaryValue, m.NewId, m.NewValue
+
+UNION ALL
+
+SELECT 'Cards.Country (NULL Id)',
+       c.CountryDictionaryId,
+       c.CountryDictionaryValue,
+       m.NewId,
+       m.NewValue,
+       COUNT(*)
+FROM dbo.Cards c
+JOIN #CountryMap m
+  ON LTRIM(RTRIM(c.CountryDictionaryValue)) = m.OldValue
+WHERE c.CountryDictionaryId IS NULL OR LTRIM(RTRIM(c.CountryDictionaryId)) = ''
+GROUP BY c.CountryDictionaryId, c.CountryDictionaryValue, m.NewId, m.NewValue
+
+ORDER BY 1, 6 DESC;
+
+
+-- ============================================================
+-- ПРИМЕНЕНИЕ
+-- ============================================================
+
+-- Cards.Country
+UPDATE c
+SET c.CountryDictionaryId = m.NewId,
+    c.CountryDictionaryValue = m.NewValue
+FROM dbo.Cards c
+JOIN #CountryMap m
+  ON UPPER(LTRIM(RTRIM(c.CountryDictionaryId))) = UPPER(m.OldId)
+WHERE m.OldId IS NOT NULL;
+
+UPDATE c
+SET c.CountryDictionaryId = m.NewId,
+    c.CountryDictionaryValue = m.NewValue
+FROM dbo.Cards c
+JOIN #CountryMap m
+  ON LTRIM(RTRIM(c.CountryDictionaryValue)) = m.OldValue
+WHERE c.CountryDictionaryId IS NULL OR LTRIM(RTRIM(c.CountryDictionaryId)) = '';
+
+
+-- Cards.CommissionCountry
+UPDATE c
+SET c.CommissionCountryDictionaryId = m.NewId,
+    c.CommissionCountryDictionaryValue = m.NewValue
+FROM dbo.Cards c
+JOIN #CountryMap m
+  ON UPPER(LTRIM(RTRIM(c.CommissionCountryDictionaryId))) = UPPER(m.OldId)
+WHERE m.OldId IS NOT NULL;
+
+UPDATE c
+SET c.CommissionCountryDictionaryId = m.NewId,
+    c.CommissionCountryDictionaryValue = m.NewValue
+FROM dbo.Cards c
+JOIN #CountryMap m
+  ON LTRIM(RTRIM(c.CommissionCountryDictionaryValue)) = m.OldValue
+WHERE c.CommissionCountryDictionaryId IS NULL OR LTRIM(RTRIM(c.CommissionCountryDictionaryId)) = '';
+
+
+-- Cards.LanguageSchoolCountry
+UPDATE c
+SET c.LanguageSchoolCountryDictionaryId = m.NewId,
+    c.LanguageSchoolCountryDictionaryValue = m.NewValue
+FROM dbo.Cards c
+JOIN #CountryMap m
+  ON UPPER(LTRIM(RTRIM(c.LanguageSchoolCountryDictionaryId))) = UPPER(m.OldId)
+WHERE m.OldId IS NOT NULL;
+
+
+-- Placements
+UPDATE c
+SET c.CountryDictionaryId = m.NewId,
+    c.CountryDictionaryValue = m.NewValue
+FROM dbo.Placements c
+JOIN #CountryMap m
+  ON UPPER(LTRIM(RTRIM(c.CountryDictionaryId))) = UPPER(m.OldId)
+WHERE m.OldId IS NOT NULL;
+
+UPDATE c
+SET c.CountryDictionaryId = m.NewId,
+    c.CountryDictionaryValue = m.NewValue
+FROM dbo.Placements c
+JOIN #CountryMap m
+  ON LTRIM(RTRIM(c.CountryDictionaryValue)) = m.OldValue
+WHERE c.CountryDictionaryId IS NULL OR LTRIM(RTRIM(c.CountryDictionaryId)) = '';
+
+
+-- Plans
+UPDATE c
+SET c.CountryDictionaryId = m.NewId,
+    c.CountryDictionaryValue = m.NewValue
+FROM dbo.Plans c
+JOIN #CountryMap m
+  ON UPPER(LTRIM(RTRIM(c.CountryDictionaryId))) = UPPER(m.OldId)
+WHERE m.OldId IS NOT NULL;
+
+
+-- Dogovors
+UPDATE c
+SET c.CountryDictionaryId = m.NewId,
+    c.CountryDictionaryValue = m.NewValue
+FROM dbo.Dogovors c
+JOIN #CountryMap m
+  ON UPPER(LTRIM(RTRIM(c.CountryDictionaryId))) = UPPER(m.OldId)
+WHERE m.OldId IS NOT NULL;
+
+UPDATE c
+SET c.CountryDictionaryId = m.NewId,
+    c.CountryDictionaryValue = m.NewValue
+FROM dbo.Dogovors c
+JOIN #CountryMap m
+  ON LTRIM(RTRIM(c.CountryDictionaryValue)) = m.OldValue
+WHERE c.CountryDictionaryId IS NULL
+   OR LTRIM(RTRIM(c.CountryDictionaryId)) = '';

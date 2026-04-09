@@ -1,0 +1,81 @@
+-- ============================================================
+-- Обновление языков для записей без Iin
+-- Ищем по старым Id и Value
+-- ============================================================
+
+-- ШАГ 1 — АНАЛИЗ
+SELECT
+    Iin,
+    UniversityRkLanguageDictionaryId    AS OldId,
+    UniversityRkLanguageDictionaryValue AS OldValue
+FROM dbo.Cards
+WHERE UniversityRkLanguageDictionaryId IN (
+    '516fff8e-09d8-4ab8-a738-b90ae746935a',
+    '958590f2-730d-4d56-9927-e450f4e3096e',
+    '573f2c5b-5360-4437-a2c9-908ca31e1396',
+    '17857e99-9b37-4407-8f95-ac5819d1c4a2'
+)
+AND (Iin IS NULL OR LTRIM(RTRIM(Iin)) = '');
+
+-- ШАГ 2 — ПРИМЕНЕНИЕ
+/*
+BEGIN TRANSACTION;
+BEGIN TRY
+
+    -- Русский по старому Id
+    UPDATE dbo.Cards
+    SET
+        UniversityRkLanguageDictionaryId    = '254ab26d-8342-4567-84cc-81f2e594b2b9',
+        UniversityRkLanguageDictionaryValue = 'Русский'
+    WHERE UniversityRkLanguageDictionaryId = '516fff8e-09d8-4ab8-a738-b90ae746935a'
+      AND (Iin IS NULL OR LTRIM(RTRIM(Iin)) = '');
+
+    PRINT 'Русский обновлено: ' + CAST(@@ROWCOUNT AS NVARCHAR);
+
+    -- Английский по старому Id
+    UPDATE dbo.Cards
+    SET
+        UniversityRkLanguageDictionaryId    = '5cb45a93-0ded-4305-9b8c-16c5d34da219',
+        UniversityRkLanguageDictionaryValue = 'Английский'
+    WHERE UniversityRkLanguageDictionaryId = '958590f2-730d-4d56-9927-e450f4e3096e'
+      AND (Iin IS NULL OR LTRIM(RTRIM(Iin)) = '');
+
+    PRINT 'Английский обновлено: ' + CAST(@@ROWCOUNT AS NVARCHAR);
+
+    -- Казахский по старому Id (оба старых Id)
+    UPDATE dbo.Cards
+    SET
+        UniversityRkLanguageDictionaryId    = '55857469-17c1-4493-8242-f4ff345b1433',
+        UniversityRkLanguageDictionaryValue = 'Казахский'
+    WHERE UniversityRkLanguageDictionaryId IN (
+        '573f2c5b-5360-4437-a2c9-908ca31e1396',
+        '17857e99-9b37-4407-8f95-ac5819d1c4a2'
+    )
+      AND (Iin IS NULL OR LTRIM(RTRIM(Iin)) = '');
+
+    PRINT 'Казахский обновлено: ' + CAST(@@ROWCOUNT AS NVARCHAR);
+
+    -- Проверка
+    SELECT
+        UniversityRkLanguageDictionaryId    AS NewId,
+        UniversityRkLanguageDictionaryValue AS NewValue,
+        COUNT(*) AS Кол_во
+    FROM dbo.Cards
+    WHERE UniversityRkLanguageDictionaryId IN (
+        '254ab26d-8342-4567-84cc-81f2e594b2b9',
+        '5cb45a93-0ded-4305-9b8c-16c5d34da219',
+        '55857469-17c1-4493-8242-f4ff345b1433'
+    )
+    AND (Iin IS NULL OR LTRIM(RTRIM(Iin)) = '')
+    GROUP BY UniversityRkLanguageDictionaryId, UniversityRkLanguageDictionaryValue
+    ORDER BY NewValue;
+
+    ROLLBACK;
+    -- COMMIT;
+
+END TRY
+BEGIN CATCH
+    ROLLBACK;
+    PRINT 'Ошибка: ' + ERROR_MESSAGE();
+END CATCH;
+*/
