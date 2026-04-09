@@ -1,0 +1,629 @@
+import pyodbc
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
+from datetime import datetime
+
+# ─────────────────────────────────────────────
+# НАСТРОЙКИ
+# ─────────────────────────────────────────────
+import os
+DB_SERVER    = os.environ.get("DB_SERVER", "")
+DB_DATABASE  = os.environ.get("DB_DATABASE", "")
+MAPPING_FILE  = "Country.xlsx"
+MAPPING_SHEET = "Лист1 (2)"
+
+# ─────────────────────────────────────────────
+# Excel стили
+# ─────────────────────────────────────────────
+def make_font(bold=False, color="000000", size=10):
+    return Font(name="Arial", bold=bold, color=color, size=size)
+
+def make_fill(hex_color):
+    return PatternFill("solid", fgColor=hex_color)
+
+HDR_FONT  = make_font(bold=True, color="FFFFFF")
+NORM_FONT = make_font()
+BOLD_FONT = make_font(bold=True)
+
+F_HEADER  = make_fill("1F4E79")
+F_CHANGED = make_fill("FFF2CC")   # жёлтый — нужно изменить
+F_OK      = make_fill("E2EFDA")   # зелёный — уже правильно
+F_NEW_VAL = make_fill("DEEAF1")   # голубой — новое значение
+F_RED     = make_fill("FCE4D6")   # красный — старое значение
+F_GRAY    = make_fill("F2F2F2")
+F_DRUGOE  = make_fill("EAD1DC")   # сиреневый — строки Другое (после разрешения)
+F_WARN    = make_fill("FFE0B2")   # оранжевый — Другое без разрешения
+
+thin   = Side(style="thin", color="D9D9D9")
+BORDER = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+HDR_ALIGN  = Alignment(horizontal="center", vertical="center", wrap_text=True)
+LEFT_ALIGN = Alignment(vertical="center", horizontal="left",  wrap_text=False)
+CTR_ALIGN  = Alignment(vertical="center", horizontal="center")
+
+
+def cell(ws, row, col, value, fill=None, font=None, align=None, number_format=None):
+    c = ws.cell(row=row, column=col, value=value)
+    c.font      = font or NORM_FONT
+    c.border    = BORDER
+    c.alignment = align or LEFT_ALIGN
+    if fill:          c.fill = fill
+    if number_format: c.number_format = number_format
+    return c
+
+
+def write_header_row(ws, row, headers, fill=F_HEADER, height=28):
+    for col, h in enumerate(headers, 1):
+        c = ws.cell(row=row, column=col, value=h)
+        c.font      = HDR_FONT
+        c.fill      = fill
+        c.alignment = HDR_ALIGN
+        c.border    = BORDER
+    ws.row_dimensions[row].height = height
+
+
+def add_sheet_title(ws, text, ncols):
+    ws.merge_cells(f"A1:{get_column_letter(ncols)}1")
+    c = ws["A1"]
+    c.value     = text
+    c.font      = Font(name="Arial", bold=True, size=11, color="1F4E79")
+    c.alignment = Alignment(horizontal="center", vertical="center")
+    c.fill      = make_fill("EBF3FB")
+    ws.row_dimensions[1].height = 20
+
+
+def set_col_widths(ws, widths):
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+
+# ─────────────────────────────────────────────
+# ПОДКЛЮЧЕНИЕ
+# ─────────────────────────────────────────────
+def get_conn():
+    return pyodbc.connect(
+        "DRIVER={ODBC Driver 17 for SQL Server};"
+        f"SERVER={DB_SERVER};DATABASE={DB_DATABASE};"
+        "Trusted_Connection=yes;",
+        timeout=0
+    )
+
+
+# ─────────────────────────────────────────────
+# ЧТЕНИЕ МАППИНГА
+# ─────────────────────────────────────────────
+def safe_int(v):
+    try:
+        return int(v or 0)
+    except (ValueError, TypeError):
+        return 0
+
+
+def load_mapping(filepath, sheet_name):
+    """
+    Загружает маппинг и разрешает записи с Value='Другое':
+      - Если OldId есть → ищем другую строку с тем же OldId и Value != 'Другое',
+        берём оттуда реальный Value и OldValue.
+      - Если OldId=NULL → помечаем как неразрешимое (resolved=False).
+
+    Возвращает список словарей с полем 'resolved_value'
+    (итоговое значение которое нужно поставить в БД вместо 'Другое').
+    """
+    wb = openpyxl.load_workbook(filepath, data_only=True)
+    ws = wb[sheet_name]
+
+    raw_rows = []
+    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, values_only=True):
+        if not any(v for v in row):
+            continue
+        try:
+            (num, new_id, new_val, old_id, old_val, src,
+             code, is_del, is_cur,
+             cards, commission, placement, langschool,
+             dogovors, movements, plans, dict_count, total) = row[:18]
+        except ValueError:
+            continue
+
+        def s(v):  return str(v or "").strip()
+        def su(v): return s(v).upper()
+
+        old_id_clean  = s(old_id)  if su(old_id)  not in ("NULL", "") else None
+        new_id_clean  = s(new_id)  if su(new_id)  not in ("NULL", "") else None
+        old_val_clean = s(old_val) if s(old_val)  not in ("NULL", "") else None
+        new_val_clean = s(new_val) if s(new_val)  not in ("NULL", "") else None
+
+        sources = [x.strip() for x in s(src).split(",")
+                   if x.strip() and x.strip() != "NULL"]
+
+        raw_rows.append({
+            "num":        num,
+            "new_id":     new_id_clean,
+            "new_value":  new_val_clean,
+            "old_id":     old_id_clean,
+            "old_value":  old_val_clean,
+            "sources":    sources,
+            "code":       s(code) if s(code) != "NULL" else None,
+            "is_deleted": is_del,
+            "is_current": is_cur,
+            "cards":      safe_int(cards),
+            "commission": safe_int(commission),
+            "placement":  safe_int(placement),
+            "langschool": safe_int(langschool),
+            "dogovors":   safe_int(dogovors),
+            "movements":  safe_int(movements),
+            "plans":      safe_int(plans),
+            "dict_count": safe_int(dict_count),
+            "total":      safe_int(total),
+            "is_drugoe":  (new_val_clean == "Другое"),
+        })
+
+    # ── Разрешаем "Другое" ───────────────────────────────────
+    # Строим индекс: OldId (upper) → список строк где Value != "Другое"
+    oldid_index = {}
+    for r in raw_rows:
+        if r["old_id"] and not r["is_drugoe"]:
+            key = r["old_id"].upper()
+            oldid_index.setdefault(key, []).append(r)
+
+    drugoe_resolved   = 0
+    drugoe_unresolved = 0
+
+    rows = []
+    for r in raw_rows:
+        if r["is_drugoe"]:
+            resolved_value    = None
+            resolved_old_val  = None
+            resolved_new_id   = r["new_id"]   # Id у "Другое" остаётся — это правильный новый Id
+            resolved          = False
+
+            if r["old_id"]:
+                key = r["old_id"].upper()
+                candidates = oldid_index.get(key, [])
+                if candidates:
+                    # Берём кандидата у которого OldValue совпадает с OldValue строки Другое
+                    # (наиболее точное совпадение). Если такого нет — берём первого.
+                    # ВАЖНО: new_id берём от кандидата (реальная страна),
+                    # а НЕ от строки Другое (7a927113 = Id самого "Другое").
+                    exact = next(
+                        (c for c in candidates
+                         if c["old_value"] and r["old_value"]
+                         and c["old_value"].strip().upper() == r["old_value"].strip().upper()),
+                        candidates[0]
+                    )
+                    resolved_value   = exact["new_value"]  # правильное название страны
+                    resolved_old_val = exact["old_value"]  # старое название в БД
+                    resolved_new_id  = exact["new_id"]     # правильный new_id страны (не Id Другого!)
+                    resolved         = True
+                    drugoe_resolved += 1
+                else:
+                    drugoe_unresolved += 1
+            else:
+                # OldId=NULL и Value=Другое — не можем определить реальное название
+                drugoe_unresolved += 1
+
+            r["resolved_value"]   = resolved_value
+            r["resolved_old_val"] = resolved_old_val
+            r["resolved_new_id"]  = resolved_new_id
+            r["resolved"]         = resolved
+        else:
+            r["resolved_value"]   = r["new_value"]
+            r["resolved_old_val"] = r["old_value"]
+            r["resolved_new_id"]  = r["new_id"]
+            r["resolved"]         = True
+
+        effective_new_id  = r["resolved_new_id"]
+        effective_new_val = r["resolved_value"]
+        effective_old_val = r["resolved_old_val"] or r["old_value"]
+
+        r["needs_id"]  = (r["old_id"] is not None and
+                          (r["old_id"].upper() != (effective_new_id or "").upper()))
+        r["needs_val"] = (effective_old_val is not None and
+                          effective_old_val != (effective_new_val or ""))
+
+        rows.append(r)
+
+    print(f"  Маппинг загружен: {len(rows)} строк")
+    print(f"  Строк 'Другое': {drugoe_resolved + drugoe_unresolved} "
+          f"(разрешено: {drugoe_resolved}, неразрешимо: {drugoe_unresolved})")
+    print(f"  Требуют изменений: {sum(1 for r in rows if r['needs_id'] or r['needs_val'])}")
+    return rows
+
+
+# ─────────────────────────────────────────────
+# КОНФИГУРАЦИЯ ТАБЛИЦ
+# ─────────────────────────────────────────────
+TABLE_CONFIG = {
+    "Cards.Country": (
+        "dbo.Cards", "CountryDictionaryId", "CountryDictionaryValue",
+        ["Id AS CardId",
+         "LTRIM(RTRIM(ISNULL(LastName,'')+' '+ISNULL(FirstName,''))) AS StudentName"]
+    ),
+    "Cards.CommissionCountry": (
+        "dbo.Cards", "CommissionCountryDictionaryId", "CommissionCountryDictionaryValue",
+        ["Id AS CardId",
+         "LTRIM(RTRIM(ISNULL(LastName,'')+' '+ISNULL(FirstName,''))) AS StudentName"]
+    ),
+    "Cards.LanguageSchoolCountry": (
+        "dbo.Cards", "LanguageSchoolCountryDictionaryId", "LanguageSchoolCountryDictionaryValue",
+        ["Id AS CardId",
+         "LTRIM(RTRIM(ISNULL(LastName,'')+' '+ISNULL(FirstName,''))) AS StudentName"]
+    ),
+    "Placement.Country": (
+        "dbo.Placements", "CountryDictionaryId", "CountryDictionaryValue",
+        ["Id AS PlacementId"]
+    ),
+    "Dogovors.Country": (
+        "dbo.Dogovors", "CountryDictionaryId", "CountryDictionaryValue",
+        ["Id AS DogovorId"]
+    ),
+    "Movements.Country": (
+        "dbo.Movements", "CountryDictionaryId", "CountryDictionaryValue",
+        ["Id AS MovementId"]
+    ),
+    "Plans.Country": (
+        "dbo.Plans", "CountryDictionaryId", "CountryDictionaryValue",
+        ["Id AS PlanId"]
+    ),
+}
+
+
+# ─────────────────────────────────────────────
+# ЗАПРОСЫ К БД
+# ─────────────────────────────────────────────
+def fetch_records_for_table(cursor, table_key, mapping_rows):
+    if table_key not in TABLE_CONFIG:
+        return []
+
+    sql_table, id_col, val_col, extra_cols = TABLE_CONFIG[table_key]
+    is_movements = (table_key == "Movements.Country")
+
+    pairs = [r for r in mapping_rows
+             if table_key in r["sources"] and (r["needs_id"] or r["needs_val"])]
+    if not pairs:
+        return []
+
+    results = []
+
+    for r in pairs:
+        old_id  = r["old_id"]
+
+        # Для "Другое" используем resolved_old_val для поиска в БД
+        # (это реальное старое название которое лежит в БД)
+        if r["is_drugoe"] and r["resolved"]:
+            old_val = r["resolved_old_val"]
+        else:
+            old_val = r["old_value"]
+
+        # Для "Другое" берём new_id и new_value от реальной страны (не от строки Другое)
+        new_id  = r["resolved_new_id"] if r["is_drugoe"] else r["new_id"]
+        new_val = r["resolved_value"]  if r["is_drugoe"] else r["new_value"]
+
+        conditions = []
+        params     = []
+
+        if old_id:
+            conditions.append(f"LTRIM(RTRIM({id_col})) = ?")
+            params.append(old_id)
+        if old_val:
+            # Всегда добавляем Value в условие если оно есть —
+            # один OldId может встречаться у разных стран в маппинге,
+            # поэтому Id + Value вместе дают точное совпадение.
+            # Если OldId=NULL — ищем только по Value (conditions будет только один).
+            conditions.append(f"LTRIM(RTRIM({val_col})) = ?")
+            params.append(old_val)
+
+        if not conditions:
+            continue
+
+        where = " AND ".join(conditions)
+
+        if is_movements:
+            sql = f"SELECT COUNT(*) FROM {sql_table} WITH(NOLOCK) WHERE {where}"
+            try:
+                cursor.execute(sql, params)
+                cnt = cursor.fetchone()[0]
+                if cnt > 0:
+                    results.append({
+                        "old_id":       old_id,
+                        "old_value":    old_val,
+                        "new_id":       new_id,
+                        "new_value":    new_val,
+                        "count":        cnt,
+                        "record_id":    f"[{cnt} записей]",
+                        "extra":        {},
+                        "is_drugoe":    r["is_drugoe"],
+                        "resolved":     r["resolved"],
+                    })
+            except Exception as e:
+                results.append({
+                    "old_id": old_id, "old_value": old_val,
+                    "new_id": new_id, "new_value": new_val,
+                    "count": 0, "record_id": f"ОШИБКА: {e}",
+                    "extra": {}, "is_drugoe": r["is_drugoe"], "resolved": r["resolved"],
+                })
+        else:
+            extra_str = ", ".join(extra_cols)
+            sql = (f"SELECT {extra_str}, "
+                   f"LTRIM(RTRIM({id_col})) AS CurId, "
+                   f"LTRIM(RTRIM({val_col})) AS CurVal "
+                   f"FROM {sql_table} WITH(NOLOCK) WHERE {where}")
+            try:
+                cursor.execute(sql, params)
+                fetched = cursor.fetchall()
+                cols    = [d[0] for d in cursor.description]
+                for row in fetched:
+                    rec   = dict(zip(cols, row))
+                    extra = {k: v for k, v in rec.items()
+                             if k not in ("CurId", "CurVal")}
+                    results.append({
+                        "old_id":    rec.get("CurId", old_id),
+                        "old_value": rec.get("CurVal", old_val),
+                        "new_id":    new_id,
+                        "new_value": new_val,
+                        "count":     1,
+                        "record_id": list(extra.values())[0] if extra else "",
+                        "extra":     extra,
+                        "is_drugoe": r["is_drugoe"],
+                        "resolved":  r["resolved"],
+                    })
+            except Exception as e:
+                import traceback
+                print(f"\n  [WARN] {table_key} ошибка: {e}")
+                traceback.print_exc()
+                results.append({
+                    "old_id": old_id, "old_value": old_val,
+                    "new_id": new_id, "new_value": new_val,
+                    "count": 0, "record_id": f"ОШИБКА: {e}",
+                    "extra": {}, "is_drugoe": r["is_drugoe"], "resolved": r["resolved"],
+                })
+
+    return results
+
+
+def fetch_country_counts(cursor):
+    print("  Считаем студентов по странам...", end=" ", flush=True)
+    sql = """
+        SELECT
+            c.CountryDictionaryId    AS DictId,
+            c.CountryDictionaryValue AS CountryName,
+            COUNT(*)                 AS StudentCount
+        FROM dbo.Cards c WITH(NOLOCK)
+        WHERE c.CountryDictionaryValue IS NOT NULL
+          AND LTRIM(RTRIM(c.CountryDictionaryValue)) <> ''
+        GROUP BY c.CountryDictionaryId, c.CountryDictionaryValue
+        ORDER BY COUNT(*) DESC
+    """
+    cursor.execute(sql)
+    rows = cursor.fetchall()
+    print(f"{len(rows)} стран")
+    return rows
+
+
+# ─────────────────────────────────────────────
+# ПОСТРОЕНИЕ EXCEL
+# ─────────────────────────────────────────────
+def build_excel(mapping, db_data, country_counts, output_path):
+    wb = openpyxl.Workbook()
+
+    # ── Лист 1: Маппинг ──────────────────────────────────────
+    ws_map = wb.active
+    ws_map.title = "1. Маппинг замен"
+    ws_map.freeze_panes = "A3"
+
+    changed  = [r for r in mapping if r["needs_id"] or r["needs_val"]]
+    drugoe_r = [r for r in mapping if r["is_drugoe"] and r["resolved"]]
+    drugoe_u = [r for r in mapping if r["is_drugoe"] and not r["resolved"]]
+
+    title_text = (
+        f"Маппинг замен — {len(changed)} записей требуют изменений  |  "
+        f"Другое разрешено: {len(drugoe_r)}, неразрешимо: {len(drugoe_u)}  |  "
+        f"{datetime.now().strftime('%d.%m.%Y %H:%M')}"
+    )
+    add_sheet_title(ws_map, title_text, 12)
+
+    h = ["#", "Старый Id (OldId)", "Старое название (OldValue)",
+         "Новый Id", "Новое название (Value)",
+         "Было 'Другое'?", "Разрешено в",
+         "Изменить Id?", "Изменить название?",
+         "Таблицы", "Всего записей", "Статус"]
+    write_header_row(ws_map, 2, h)
+
+    for r_idx, r in enumerate(mapping, 3):
+        needs   = r["needs_id"] or r["needs_val"]
+        is_d    = r["is_drugoe"]
+        resolved = r.get("resolved", True)
+
+        if is_d and resolved:
+            f_row = F_DRUGOE
+            f_new = F_DRUGOE
+        elif is_d and not resolved:
+            f_row = F_WARN
+            f_new = F_WARN
+        elif needs:
+            f_row = F_CHANGED
+            f_new = F_NEW_VAL
+        else:
+            f_row = F_OK
+            f_new = F_OK
+
+        status = ("Изменить (было Другое)" if is_d and resolved
+                  else "⚠ Другое — не разрешено" if is_d and not resolved
+                  else "Изменить" if needs
+                  else "Уже правильно")
+
+        # Для Другое показываем итоговый new_id и new_value страны, а не "Другое"
+        display_new_id  = r["resolved_new_id"] if r["is_drugoe"] else r["new_id"]
+        display_new_val = r["resolved_value"]  if r["is_drugoe"] else r["new_value"]
+
+        cell(ws_map, r_idx, 1,  r["num"],                       f_row, align=CTR_ALIGN)
+        cell(ws_map, r_idx, 2,  r["old_id"],                    F_RED if r["needs_id"] else f_row)
+        cell(ws_map, r_idx, 3,  r["old_value"],                 F_RED if r["needs_val"] else f_row)
+        cell(ws_map, r_idx, 4,  display_new_id,                 f_new)
+        cell(ws_map, r_idx, 5,  display_new_val,                f_new, font=BOLD_FONT)
+        cell(ws_map, r_idx, 6,  "ДА" if is_d else "—",         f_row, align=CTR_ALIGN)
+        cell(ws_map, r_idx, 7,  r.get("resolved_value", ""),   F_DRUGOE if is_d and resolved else f_row)
+        cell(ws_map, r_idx, 8,  "ДА" if r["needs_id"]  else "—", f_row, align=CTR_ALIGN)
+        cell(ws_map, r_idx, 9,  "ДА" if r["needs_val"] else "—", f_row, align=CTR_ALIGN)
+        cell(ws_map, r_idx, 10, ", ".join(r["sources"]),        f_row)
+        cell(ws_map, r_idx, 11, r["total"],                     f_row, align=CTR_ALIGN)
+        cell(ws_map, r_idx, 12, status,                         F_DRUGOE if is_d and resolved
+                                                                 else F_WARN if is_d
+                                                                 else F_CHANGED if needs else F_OK,
+             align=CTR_ALIGN)
+
+    set_col_widths(ws_map, [5, 38, 45, 38, 45, 13, 45, 12, 16, 60, 13, 24])
+    ws_map.auto_filter.ref = f"A2:L{len(mapping)+2}"
+
+    # ── Листы 2-8: по таблицам ───────────────────────────────
+    TABLE_SHEETS = [
+        ("2. Cards (Country)",       "Cards.Country",              ["CardId", "StudentName"]),
+        ("3. Cards (Commission)",    "Cards.CommissionCountry",    ["CardId", "StudentName"]),
+        ("4. Cards (LangSchool)",    "Cards.LanguageSchoolCountry",["CardId", "StudentName"]),
+        ("5. Placements",            "Placement.Country",          ["PlacementId"]),
+        ("6. Dogovors",              "Dogovors.Country",           ["DogovorId"]),
+        ("7. Movements (кол-во)",    "Movements.Country",          []),
+        ("8. Plans",                 "Plans.Country",              ["PlanId"]),
+    ]
+
+    for sheet_name, table_key, extra_headers in TABLE_SHEETS:
+        ws = wb.create_sheet(sheet_name)
+        ws.freeze_panes = "A3"
+        records      = db_data.get(table_key, [])
+        is_movements = (table_key == "Movements.Country")
+
+        if is_movements:
+            add_sheet_title(ws,
+                f"{sheet_name} — COUNT по Id (данные не загружаются, 14 млн строк)", 7)
+            h_mv = ["Старый Id", "Старое название", "Новый Id", "Новое название",
+                    "Было 'Другое'?", "Кол-во записей", "Действие"]
+            write_header_row(ws, 2, h_mv)
+            for r_idx, rec in enumerate(records, 3):
+                is_d = rec.get("is_drugoe", False)
+                f    = F_DRUGOE if is_d else (F_CHANGED if rec["count"] > 0 else F_OK)
+                cell(ws, r_idx, 1, rec["old_id"],    f)
+                cell(ws, r_idx, 2, rec["old_value"],  F_RED)
+                cell(ws, r_idx, 3, rec["new_id"],    F_NEW_VAL)
+                cell(ws, r_idx, 4, rec["new_value"],  F_NEW_VAL, font=BOLD_FONT)
+                cell(ws, r_idx, 5, "ДА" if is_d else "—", f, align=CTR_ALIGN)
+                cell(ws, r_idx, 6, rec["count"],      f, align=CTR_ALIGN)
+                cell(ws, r_idx, 7, "UPDATE CountryDictionaryId + Value", f)
+            set_col_widths(ws, [38, 45, 38, 45, 13, 16, 38])
+        else:
+            total_recs = len(records)
+            add_sheet_title(ws,
+                f"{sheet_name} — {total_recs} записей требуют изменений",
+                7 + len(extra_headers))
+            h_tbl = (extra_headers or []) + [
+                "Старый Id", "Старое название",
+                "Новый Id",  "Новое название",
+                "Было 'Другое'?", "Действие"
+            ]
+            write_header_row(ws, 2, h_tbl)
+
+            for r_idx, rec in enumerate(records, 3):
+                is_d = rec.get("is_drugoe", False)
+                col  = 1
+                for eh in (extra_headers or []):
+                    val = rec["extra"].get(eh, "")
+                    cell(ws, r_idx, col, val, F_GRAY)
+                    col += 1
+                cell(ws, r_idx, col,   rec["old_id"],   F_RED)
+                cell(ws, r_idx, col+1, rec["old_value"], F_RED)
+                cell(ws, r_idx, col+2, rec["new_id"],   F_NEW_VAL)
+                cell(ws, r_idx, col+3, rec["new_value"], F_NEW_VAL, font=BOLD_FONT)
+                cell(ws, r_idx, col+4,
+                     "ДА" if is_d else "—",
+                     F_DRUGOE if is_d else F_GRAY,
+                     align=CTR_ALIGN)
+                action = ("UPDATE Id + Value (было Другое)" if is_d
+                          else "UPDATE Id + Value" if rec["old_id"]
+                          else "UPDATE Value only")
+                cell(ws, r_idx, col+5, action,
+                     F_DRUGOE if is_d else F_CHANGED,
+                     align=CTR_ALIGN)
+
+            extra_w = [15, 30] if len(extra_headers) == 2 else ([15] if extra_headers else [])
+            set_col_widths(ws, extra_w + [38, 42, 38, 42, 13, 28])
+
+        if not records:
+            ws.cell(row=3, column=1, value="Нет записей требующих изменений").font = NORM_FONT
+
+    # ── Лист 9: Кол-во студентов по странам ──────────────────
+    ws_cnt = wb.create_sheet("9. Кол-во студентов по странам")
+    ws_cnt.freeze_panes = "A3"
+    add_sheet_title(ws_cnt,
+        f"Количество студентов по странам (Cards)  —  {len(country_counts)} стран", 5)
+    write_header_row(ws_cnt, 2,
+        ["#", "Id страны (DictionaryId)", "Название страны", "Кол-во студентов", "% от общего"])
+
+    total_students = sum(r[2] for r in country_counts)
+    for r_idx, (dict_id, name, cnt) in enumerate(country_counts, 3):
+        pct = round(cnt / total_students * 100, 2) if total_students else 0
+        f   = F_GRAY if r_idx % 2 == 0 else None
+        cell(ws_cnt, r_idx, 1, r_idx - 2,         f, align=CTR_ALIGN)
+        cell(ws_cnt, r_idx, 2, str(dict_id or "NULL"), f)
+        cell(ws_cnt, r_idx, 3, name,               f, font=BOLD_FONT if r_idx <= 12 else NORM_FONT)
+        cell(ws_cnt, r_idx, 4, cnt,                f, align=CTR_ALIGN)
+        pct_c = cell(ws_cnt, r_idx, 5, pct / 100, f, align=CTR_ALIGN)
+        pct_c.number_format = "0.00%"
+
+    last = len(country_counts) + 3
+    ws_cnt.cell(row=last, column=3, value="ИТОГО").font = BOLD_FONT
+    cell(ws_cnt, last, 4, total_students, font=BOLD_FONT, align=CTR_ALIGN).fill = make_fill("BDD7EE")
+    c = cell(ws_cnt, last, 5, 1.0, align=CTR_ALIGN)
+    c.number_format = "0.00%"
+
+    set_col_widths(ws_cnt, [5, 38, 42, 18, 14])
+    ws_cnt.auto_filter.ref = f"A2:E{len(country_counts)+2}"
+
+    wb.save(output_path)
+    print(f"\n✅ Excel сохранён: {output_path}")
+
+
+# ─────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────
+def main():
+    print("=" * 60)
+    print("normalize_preview.py  — только чтение, БД не меняется")
+    print("=" * 60)
+
+    print("\n[1/3] Читаем маппинг из Country.xlsx...")
+    mapping = load_mapping(MAPPING_FILE, MAPPING_SHEET)
+
+    print("\n[2/3] Подключаемся к БД и собираем данные...")
+    conn = get_conn()
+    try:
+        cursor = conn.cursor()
+        db_data = {}
+        table_keys = [
+            "Cards.Country", "Cards.CommissionCountry", "Cards.LanguageSchoolCountry",
+            "Placement.Country", "Dogovors.Country", "Movements.Country", "Plans.Country",
+        ]
+        for tk in table_keys:
+            print(f"  {tk}...", end=" ", flush=True)
+            records      = fetch_records_for_table(cursor, tk, mapping)
+            db_data[tk]  = records
+            print(f"{len(records)} записей")
+
+        country_counts = fetch_country_counts(cursor)
+    finally:
+        conn.close()
+
+    print("\n[3/3] Формируем Excel...")
+    output = f"normalization_preview_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    build_excel(mapping, db_data, country_counts, output)
+
+    total_changes = sum(len(v) for v in db_data.values())
+    print(f"\n{'='*60}")
+    print(f"Итого записей требующих изменений: {total_changes}")
+    for tk in table_keys:
+        cnt = len(db_data[tk])
+        if cnt:
+            print(f"  {tk}: {cnt}")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    main()
